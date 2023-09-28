@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/joho/godotenv"
 )
@@ -129,6 +130,8 @@ type Owner struct {
 	SiteAdmin         bool   `json:"site_admin"`
 }
 
+var wg sync.WaitGroup
+
 func main() {
 	err := godotenv.Load()
 	if err != nil {
@@ -168,16 +171,25 @@ func main() {
 
 	// Clone all repos + fetch + pull
 	for _, repo := range repos {
-		repoPath := folderPath + "/" + repo.Name
-		cloneRepo(repo, repoPath)
-		fetchRepository(repo, repoPath)
-		switchAndPull(repo, repoPath)
+		wg.Add(1)
+		go processRepo(repo, folderPath)
 	}
+	// Wait for all goroutines to finish
+	wg.Wait()
 
 	// Create a ZIP file
 	if err := zipSource("repos", "repos.zip"); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func processRepo(repo Repo, folderPath string) {
+	defer wg.Done()
+
+	repoPath := folderPath + "/" + repo.Name
+	cloneRepo(repo, repoPath)
+	fetchRepository(repo, repoPath)
+	switchAndPull(repo, repoPath)
 }
 
 func zipSource(source, target string) error {
