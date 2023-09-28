@@ -1,6 +1,7 @@
 package main
 
 import (
+	"archive/zip"
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
@@ -9,6 +10,8 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 
 	"github.com/joho/godotenv"
 )
@@ -127,7 +130,17 @@ type Owner struct {
 }
 
 func main() {
-	jsonData, err := fetchAllRepoFromUser("Teyik0")
+	err := godotenv.Load()
+	if err != nil {
+		log.Fatal("Error loading .env file", err)
+	}
+
+	// Fetch all repos from user
+	user, ok := os.LookupEnv("GITHUB_USER")
+	if !ok {
+		log.Fatal("GITHUB_USER is not set in .env file")
+	}
+	jsonData, err := fetchAllRepoFromUser(user)
 	if err != nil {
 		log.Fatal("test", err)
 	}
@@ -138,20 +151,8 @@ func main() {
 		log.Fatal("Error decoding JSON:", err)
 	}
 
-	// Create a CSV file
-	createCSVFile(repos)
-
-	// Clone all repos
-	cloneRepo(repos)
-
-	// Git pull all repos
-
-}
-
-func cloneRepo(repos []Repo) {
-	//Run the git clone command
+	// Create/Verifie the folder for the cloned repos and the csv
 	folderPath := "repos"
-
 	_, err1 := os.Stat(folderPath)
 	if err1 != nil {
 		fmt.Println("Creating folder repos...")
@@ -162,29 +163,141 @@ func cloneRepo(repos []Repo) {
 		fmt.Println(err2)
 	}
 
+	// Create a CSV file
+	createCSVFile(repos)
+
+	// Clone all repos + fetch + pull
 	for _, repo := range repos {
-		fmt.Printf("Cloning repository : %s ....\n", repo.FullName)
-		newPath := folderPath + "/" + repo.Name
-		_, err := os.Stat(newPath)
+		repoPath := folderPath + "/" + repo.Name
+		cloneRepo(repo, repoPath)
+		fetchRepository(repo, repoPath)
+		switchAndPull(repo, repoPath)
+	}
+
+	// Create a ZIP file
+	if err := zipSource("repos", "repos.zip"); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func zipSource(source, target string) error {
+	// 1. Create a ZIP file and zip.Writer
+	f, err := os.Create(target)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	writer := zip.NewWriter(f)
+	defer writer.Close()
+
+	// 2. Go through all the files of the source
+	return filepath.Walk(source, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
-			os.Mkdir(newPath, os.ModePerm)
-			cmd := exec.Command("git", "clone", repo.CloneURL, newPath)
-			if err := cmd.Run(); err != nil {
-				log.Fatal(err)
-			}
-		} else {
-			fmt.Printf("Directory already exists : %s", newPath)
+			return err
 		}
+
+		// 3. Create a local file header
+		header, err := zip.FileInfoHeader(info)
+		if err != nil {
+			return err
+		}
+
+		// set compression
+		header.Method = zip.Deflate
+
+		// 4. Set relative path of a file as the header name
+		header.Name, err = filepath.Rel(filepath.Dir(source), path)
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			header.Name += "/"
+		}
+
+		// 5. Create writer for the file header and save content of the file
+		headerWriter, err := writer.CreateHeader(header)
+		if err != nil {
+			return err
+		}
+
+		if info.IsDir() {
+			return nil
+		}
+
+		f, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+
+		_, err = io.Copy(headerWriter, f)
+		return err
+	})
+}
+
+func _getLastCommitBranch(repoPath string) (string, error) {
+	cmd := exec.Command("git", "-C", repoPath, "rev-parse", "--abbrev-ref", "HEAD")
+	output, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+
+	return strings.TrimSpace(string(output)), nil
+}
+
+func pullRepository(repo Repo, repoPath string) {
+	fmt.Printf("Pulling to the latest changes for repository: %s ...\n\n", repo.Name)
+	cmd := exec.Command("git", "-C", repoPath, "pull")
+	if err := cmd.Run(); err != nil {
+		log.Printf("Error pulling repository %s: %s\n\n", repo.Name, err)
+	}
+}
+
+func switchAndPull(repo Repo, repoPath string) {
+	lastCommitBranch, err := _getLastCommitBranch(repoPath)
+	if err != nil {
+		log.Printf("Error getting last commit branch for repository %s: %s\n", repo.Name, err)
+		return
+	}
+	fmt.Println("Last commit branch : ", lastCommitBranch)
+
+	if lastCommitBranch != "main" {
+		cmd := exec.Command("git", "-C", repoPath, "checkout", lastCommitBranch)
+		if err := cmd.Run(); err != nil {
+			log.Printf("Error switching to branch %s for repository %s: %s", lastCommitBranch, repo.Name, err)
+		}
+	}
+
+	// Pull the latest changes
+	pullRepository(repo, repoPath)
+}
+
+func fetchRepository(repo Repo, repoPath string) {
+	fmt.Printf("| Fetching latest changes for repository: %s ...\n", repo.Name)
+	cmd := exec.Command("git", "fetch", repoPath)
+	if err := cmd.Run(); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func cloneRepo(repo Repo, repoPath string) {
+	_, err := os.Stat(repoPath)
+	if err != nil {
+		fmt.Printf("| Cloning repository : %s ...\n", repo.FullName)
+		os.Mkdir(repoPath, os.ModePerm)
+		cmd := exec.Command("git", "clone", repo.CloneURL, repoPath)
+		if err := cmd.Run(); err != nil {
+			log.Fatal("Failed to clone repo", err)
+		}
+	} else {
+		fmt.Printf("| Directory %s already exists \n", repoPath)
 	}
 }
 
 func fetchAllRepoFromUser(username string) (string, error) {
 	const githubAPIEndpoint = "https://api.github.com/users/%s/repos"
 
-	err := godotenv.Load()
-	if err != nil {
-		log.Fatal("Error loading .env file", err)
-	}
 	tokenUrl, ok := os.LookupEnv("GITHUB_TOKEN")
 	if !ok {
 		log.Fatal("GITHUB_TOKEN is not set in .env file")
@@ -214,7 +327,7 @@ func fetchAllRepoFromUser(username string) (string, error) {
 
 func createCSVFile(repos []Repo) error {
 	// Create a CSV file
-	file, err := os.Create("repos.csv")
+	file, err := os.Create("repos/repos.csv")
 	if err != nil {
 		panic(err)
 	}
