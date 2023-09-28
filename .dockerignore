@@ -1,5 +1,6 @@
+.env.exemple
+.gitignore
 repos
-.env
 /repos/repos.csv
 repos.zip
 main
